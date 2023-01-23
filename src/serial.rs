@@ -1,8 +1,8 @@
 pub mod serde {
-    use tokio_util::codec::{Decoder, Encoder};
+    use bytes::{BufMut, BytesMut};
     use std::io;
     use std::str;
-    use bytes::{BufMut,BytesMut};
+    use tokio_util::codec::{Decoder, Encoder};
 
     pub struct LineCodec;
 
@@ -38,33 +38,34 @@ pub mod serde {
 
 pub mod io {
     use crate::serial::serde::LineCodec;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use futures::stream::{SplitSink, SplitStream};
     use futures::StreamExt;
-    use tokio_util::codec::{Decoder, Framed};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
     use tokio_serial::{SerialPortBuilderExt, SerialStream};
+    use tokio_util::codec::{Decoder, Framed};
 
-    #[derive(Clone, )]
+    #[derive(Clone)]
     pub struct Sender {
-        pub tx: Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>
+        pub tx: Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>,
     }
     impl Sender {
         fn new(tx: SplitSink<Framed<SerialStream, LineCodec>, String>) -> Self {
             Sender {
-                tx: Arc::new(Mutex::new(tx))
+                tx: Arc::new(Mutex::new(tx)),
             }
         }
     }
 
     pub struct Connection {
         pub sender: Sender,
-        pub rx: SplitStream<Framed<SerialStream, LineCodec>>
+        pub rx: SplitStream<Framed<SerialStream, LineCodec>>,
     }
     impl Connection {
         pub fn new(tty_path: String) -> Self {
-
-            let mut port = tokio_serial::new(tty_path, 9600).open_native_async().unwrap();
+            let mut port = tokio_serial::new(tty_path, 9600)
+                .open_native_async()
+                .unwrap();
 
             #[cfg(unix)]
             port.set_exclusive(false)
@@ -75,7 +76,7 @@ pub mod io {
 
             Connection {
                 sender: Sender::new(tx),
-                rx
+                rx,
             }
         }
     }

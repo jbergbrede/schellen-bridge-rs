@@ -2,10 +2,9 @@ mod serial;
 use crate::serial::io::{Connection, Sender};
 use warp::{http, Filter, Rejection};
 
-use futures::{stream::{StreamExt}, SinkExt};
+use futures::{stream::StreamExt, SinkExt};
+use serde::{Deserialize, Serialize};
 use std::{env, str};
-use serde::{Serialize, Deserialize};
-
 
 #[cfg(unix)]
 const DEFAULT_TTY: &str = "/dev/ttyACM0";
@@ -32,14 +31,8 @@ impl Payload {
     }
 }
 
-async fn send_command(
-    payload: Payload,
-    sender: Sender
-) -> Result<impl warp::Reply, Rejection> {
-
-    let write_result = sender.tx.lock().await
-            .send(payload.to_payload())
-            .await;
+async fn send_command(payload: Payload, sender: Sender) -> Result<impl warp::Reply, Rejection> {
+    let write_result = sender.tx.lock().await.send(payload.to_payload()).await;
 
     match write_result {
         Ok(_) => Ok(warp::reply::with_status(
@@ -48,8 +41,6 @@ async fn send_command(
         )),
         Err(_err) => Err(warp::reject::reject()),
     }
-
-
 }
 
 #[tokio::main]
@@ -61,7 +52,8 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            let item = conn.rx
+            let item = conn
+                .rx
                 .next()
                 .await
                 .expect("Error awaiting future in RX stream.")
@@ -69,7 +61,7 @@ async fn main() {
             print!("{item}");
         }
     });
-    
+
     fn json_body() -> impl Filter<Extract = (Payload,), Error = Rejection> + Clone {
         // When accepting a body, we want a JSON body
         // (and to reject huge payloads)...
@@ -85,9 +77,5 @@ async fn main() {
         .and(with_sender.clone())
         .and_then(send_command);
 
-    warp::serve(remote)
-        .run(([127, 0, 0, 1], 3030))
-        .await;
-    
-    
+    warp::serve(remote).run(([127, 0, 0, 1], 3030)).await;
 }
