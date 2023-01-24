@@ -3,6 +3,7 @@ pub mod serde {
     use std::io;
     use std::str;
     use tokio_util::codec::{Decoder, Encoder};
+    use tracing::info;
 
     pub struct LineCodec;
 
@@ -27,57 +28,11 @@ pub mod serde {
         type Error = io::Error;
 
         fn encode(&mut self, item: String, dst: &mut BytesMut) -> Result<(), Self::Error> {
-            println!("In writer {:?}", &item);
+            info!("Writing {:?}", &item);
             dst.reserve(item.len() + 1);
             dst.put(item.as_bytes());
             dst.put_u8(b'\n');
             Ok(())
-        }
-    }
-}
-
-pub mod io {
-    use crate::serial::serde::LineCodec;
-    use futures::stream::{SplitSink, SplitStream};
-    use futures::StreamExt;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-    use tokio_serial::{SerialPortBuilderExt, SerialStream};
-    use tokio_util::codec::{Decoder, Framed};
-
-    #[derive(Clone)]
-    pub struct Sender {
-        pub tx: Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>,
-    }
-    impl Sender {
-        fn new(tx: SplitSink<Framed<SerialStream, LineCodec>, String>) -> Self {
-            Sender {
-                tx: Arc::new(Mutex::new(tx)),
-            }
-        }
-    }
-
-    pub struct Connection {
-        pub sender: Sender,
-        pub rx: SplitStream<Framed<SerialStream, LineCodec>>,
-    }
-    impl Connection {
-        pub fn new(tty_path: String) -> Self {
-            let mut port = tokio_serial::new(tty_path, 9600)
-                .open_native_async()
-                .unwrap();
-
-            #[cfg(unix)]
-            port.set_exclusive(false)
-                .expect("Unable to set serial port exclusive to false");
-
-            let stream = LineCodec.framed(port);
-            let (tx, rx) = stream.split();
-
-            Connection {
-                sender: Sender::new(tx),
-                rx,
-            }
         }
     }
 }

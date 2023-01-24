@@ -1,81 +1,89 @@
+#[macro_use]
+extern crate rocket;
 mod serial;
-use crate::serial::io::{Connection, Sender};
-use warp::{http, Filter, Rejection};
+use crate::serial::serde::LineCodec;
 
-use futures::{stream::StreamExt, SinkExt};
-use serde::{Deserialize, Serialize};
-use std::{env, str};
+use color_eyre::eyre::Result;
+use futures::{stream::SplitSink, SinkExt};
+use rocket::{
+    futures::StreamExt,
+    tokio::{
+        self,
+        time::{sleep, Duration},
+    },
+    State,
+};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use tokio_util::codec::{Decoder, Framed};
+use tracing::info;
 
 #[cfg(unix)]
 const DEFAULT_TTY: &str = "/dev/ttyACM0";
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Command {
-    Stop,
-    Up,
-    Down,
+#[get("/")]
+fn index() -> &'static str {
+    "Hello, world!"
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Payload {
-    cmd: Command,
-}
-impl Payload {
-    fn to_payload(&self) -> String {
-        match self.cmd {
-            Command::Stop => String::from("ss119000000"),
-            Command::Up => String::from("ss119010000"),
-            Command::Down => String::from("ss119020000"),
-        }
-    }
-}
+#[get("/shutter/<action>")]
+async fn action(
+    action: &str,
+    tx: &State<Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>>,
+) -> Option<String> {
+    let payload = match action.to_lowercase().as_str() {
+        "up" => String::from("ss119010000"),
+        "down" => String::from("ss119020000"),
+        "stop" => String::from("ss119000000"),
+        _ => String::from("init"),
+    };
 
-async fn send_command(payload: Payload, sender: Sender) -> Result<impl warp::Reply, Rejection> {
-    let write_result = sender.tx.lock().await.send(payload.to_payload()).await;
+    let write_result = tx.lock().await.send(payload).await;
 
     match write_result {
-        Ok(_) => Ok(warp::reply::with_status(
-            format!("Command: {:?}", payload.cmd),
-            http::StatusCode::OK,
-        )),
-        Err(_err) => Err(warp::reject::reject()),
+        Err(e) => Some(format!("Write failed! {:?}", e)),
+        Ok(_) => Some("OK\n".to_string()),
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let mut args = env::args();
-    let tty_path = args.nth(1).unwrap_or_else(|| DEFAULT_TTY.into());
+#[get("/delay/<seconds>")]
+async fn delay(seconds: u64) -> String {
+    sleep(Duration::from_secs(seconds)).await;
+    format!("Waited for {} seconds", seconds)
+}
 
-    let mut conn = Connection::new(tty_path);
+#[rocket::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let mut port = tokio_serial::new(DEFAULT_TTY, 9600)
+        .open_native_async()
+        .expect(format!("Unable to open serial port: {}", DEFAULT_TTY).as_str());
+
+    #[cfg(unix)]
+    port.set_exclusive(false)
+        .expect("Unable to set serial port exclusive to false");
+
+    let stream = LineCodec.framed(port);
+    let (tx, mut rx) = stream.split();
 
     tokio::spawn(async move {
         loop {
-            let item = conn
-                .rx
+            let item = rx
                 .next()
                 .await
                 .expect("Error awaiting future in RX stream.")
                 .expect("Reading stream resulted in an error");
-            print!("{item}");
+            info!("{item}");
         }
     });
 
-    fn json_body() -> impl Filter<Extract = (Payload,), Error = Rejection> + Clone {
-        // When accepting a body, we want a JSON body
-        // (and to reject huge payloads)...
-        warp::body::content_length_limit(1024 * 16).and(warp::body::json())
-    }
+    let _rocket = rocket::build()
+        .manage(Arc::new(Mutex::new(tx)))
+        .mount("/", routes![index, action, delay])
+        .launch()
+        .await?;
 
-    let with_sender = warp::any().map(move || conn.sender.clone());
-
-    let remote = warp::post()
-        .and(warp::path("remote"))
-        .and(warp::path::end())
-        .and(json_body())
-        .and(with_sender.clone())
-        .and_then(send_command);
-
-    warp::serve(remote).run(([127, 0, 0, 1], 3030)).await;
+    Ok(())
 }
