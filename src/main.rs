@@ -1,81 +1,77 @@
-mod serial;
-use crate::serial::io::{Connection, Sender};
-use warp::{http, Filter, Rejection};
-
-use futures::{stream::StreamExt, SinkExt};
-use serde::{Deserialize, Serialize};
-use std::{env, str};
+#[macro_use]
+extern crate rocket;
+use color_eyre::eyre::Result;
+use futures::{stream::SplitSink, SinkExt};
+use rocket::{futures::StreamExt, tokio, State};
+use schellen_bridge_rs::LineCodec;
+use std::io::Error;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use tokio_util::codec::{Decoder, Framed};
+use tracing::info;
 
 #[cfg(unix)]
 const DEFAULT_TTY: &str = "/dev/ttyACM0";
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Command {
-    Stop,
-    Up,
-    Down,
+#[get("/")]
+fn index() -> &'static str {
+    "This is an API for the Schellenberg Stick."
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Payload {
-    cmd: Command,
-}
-impl Payload {
-    fn to_payload(&self) -> String {
-        match self.cmd {
-            Command::Stop => String::from("ss119000000"),
-            Command::Up => String::from("ss119010000"),
-            Command::Down => String::from("ss119020000"),
+#[get("/shutter/<cmd>")]
+async fn shutter(
+    cmd: &str,
+    tx: &State<Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>>,
+) -> Result<Option<String>, Error> {
+    let payload = match cmd.to_lowercase().as_str() {
+        "up" => Some(String::from("ss119010000")),
+        "down" => Some(String::from("ss119020000")),
+        "stop" => Some(String::from("ss119000000")),
+        "init" => Some(String::from("init")),
+        _ => None,
+    };
+
+    match payload {
+        Some(str) => {
+            tx.lock().await.send(str).await?;
+            Ok(Some(String::from("OK\n")))
         }
+        None => Ok(None),
     }
 }
 
-async fn send_command(payload: Payload, sender: Sender) -> Result<impl warp::Reply, Rejection> {
-    let write_result = sender.tx.lock().await.send(payload.to_payload()).await;
+#[rocket::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
 
-    match write_result {
-        Ok(_) => Ok(warp::reply::with_status(
-            format!("Command: {:?}", payload.cmd),
-            http::StatusCode::OK,
-        )),
-        Err(_err) => Err(warp::reject::reject()),
-    }
-}
+    let mut port = tokio_serial::new(DEFAULT_TTY, 9600)
+        .open_native_async()
+        .expect(format!("Unable to open serial port: {}", DEFAULT_TTY).as_str());
 
-#[tokio::main]
-async fn main() {
-    let mut args = env::args();
-    let tty_path = args.nth(1).unwrap_or_else(|| DEFAULT_TTY.into());
+    #[cfg(unix)]
+    port.set_exclusive(false)
+        .expect("Unable to set serial port exclusive to false");
 
-    let mut conn = Connection::new(tty_path);
+    let stream = LineCodec.framed(port);
+    let (tx, mut rx) = stream.split();
 
     tokio::spawn(async move {
         loop {
-            let item = conn
-                .rx
+            let item = rx
                 .next()
                 .await
                 .expect("Error awaiting future in RX stream.")
                 .expect("Reading stream resulted in an error");
-            print!("{item}");
+            info!("{item}");
         }
     });
 
-    fn json_body() -> impl Filter<Extract = (Payload,), Error = Rejection> + Clone {
-        // When accepting a body, we want a JSON body
-        // (and to reject huge payloads)...
-        warp::body::content_length_limit(1024 * 16).and(warp::body::json())
-    }
+    let _rocket = rocket::build()
+        .manage(Arc::new(Mutex::new(tx)))
+        .mount("/", routes![index, shutter])
+        .launch()
+        .await?;
 
-    let with_sender = warp::any().map(move || conn.sender.clone());
-
-    let remote = warp::post()
-        .and(warp::path("remote"))
-        .and(warp::path::end())
-        .and(json_body())
-        .and(with_sender.clone())
-        .and_then(send_command);
-
-    warp::serve(remote).run(([127, 0, 0, 1], 3030)).await;
+    Ok(())
 }
