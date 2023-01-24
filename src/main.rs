@@ -1,18 +1,10 @@
 #[macro_use]
 extern crate rocket;
-mod serial;
-use crate::serial::serde::LineCodec;
-
 use color_eyre::eyre::Result;
 use futures::{stream::SplitSink, SinkExt};
-use rocket::{
-    futures::StreamExt,
-    tokio::{
-        self,
-        time::{sleep, Duration},
-    },
-    State,
-};
+use rocket::{futures::StreamExt, tokio, State};
+use schellen_bridge_rs::LineCodec;
+use std::io::Error;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
@@ -24,33 +16,29 @@ const DEFAULT_TTY: &str = "/dev/ttyACM0";
 
 #[get("/")]
 fn index() -> &'static str {
-    "Hello, world!"
+    "This is an API for the Schellenberg Stick."
 }
 
-#[get("/shutter/<action>")]
-async fn action(
-    action: &str,
+#[get("/shutter/<cmd>")]
+async fn shutter(
+    cmd: &str,
     tx: &State<Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>>,
-) -> Option<String> {
-    let payload = match action.to_lowercase().as_str() {
-        "up" => String::from("ss119010000"),
-        "down" => String::from("ss119020000"),
-        "stop" => String::from("ss119000000"),
-        _ => String::from("init"),
+) -> Result<Option<String>, Error> {
+    let payload = match cmd.to_lowercase().as_str() {
+        "up" => Some(String::from("ss119010000")),
+        "down" => Some(String::from("ss119020000")),
+        "stop" => Some(String::from("ss119000000")),
+        "init" => Some(String::from("init")),
+        _ => None,
     };
 
-    let write_result = tx.lock().await.send(payload).await;
-
-    match write_result {
-        Err(e) => Some(format!("Write failed! {:?}", e)),
-        Ok(_) => Some("OK\n".to_string()),
+    match payload {
+        Some(str) => {
+            tx.lock().await.send(str).await?;
+            Ok(Some(String::from("OK\n")))
+        }
+        None => Ok(None),
     }
-}
-
-#[get("/delay/<seconds>")]
-async fn delay(seconds: u64) -> String {
-    sleep(Duration::from_secs(seconds)).await;
-    format!("Waited for {} seconds", seconds)
 }
 
 #[rocket::main]
@@ -81,7 +69,7 @@ async fn main() -> Result<()> {
 
     let _rocket = rocket::build()
         .manage(Arc::new(Mutex::new(tx)))
-        .mount("/", routes![index, action, delay])
+        .mount("/", routes![index, shutter])
         .launch()
         .await?;
 
