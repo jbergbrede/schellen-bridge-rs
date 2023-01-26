@@ -3,8 +3,9 @@ extern crate rocket;
 use color_eyre::eyre::Result;
 use futures::{stream::SplitSink, SinkExt};
 use rocket::{futures::StreamExt, tokio, State};
-use schellen_bridge_rs::LineCodec;
+use schellen_bridge_rs::{Command, LineCodec};
 use std::io::Error;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
@@ -24,20 +25,12 @@ async fn shutter(
     cmd: &str,
     tx: &State<Arc<Mutex<SplitSink<Framed<SerialStream, LineCodec>, String>>>>,
 ) -> Result<Option<String>, Error> {
-    let payload = match cmd.to_lowercase().as_str() {
-        "up" => Some(String::from("ss119010000")),
-        "down" => Some(String::from("ss119020000")),
-        "stop" => Some(String::from("ss119000000")),
-        "init" => Some(String::from("init")),
-        _ => None,
-    };
-
-    match payload {
-        Some(str) => {
-            tx.lock().await.send(str).await?;
+    match Command::from_str(cmd) {
+        Ok(cmd) => {
+            tx.lock().await.send(cmd.payload).await?;
             Ok(Some(String::from("OK\n")))
         }
-        None => Ok(None),
+        Err(_) => Ok(None),
     }
 }
 

@@ -1,8 +1,37 @@
 use bytes::{BufMut, BytesMut};
 use std::io;
 use std::str;
+use std::str::FromStr;
+use strum::{Display, EnumString, ParseError};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::info;
+
+pub struct Command {
+    pub payload: String,
+}
+
+impl FromStr for Command {
+    type Err = ParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let cmd = Cmd::from_str(s)?;
+        let payload = match cmd {
+            Cmd::Up => String::from("ss119010000"),
+            Cmd::Down => String::from("ss119020000"),
+            Cmd::Stop => String::from("ss119000000"),
+            Cmd::Init => String::from("init"),
+        };
+        Ok(Command { payload })
+    }
+}
+
+#[derive(Debug, Display, EnumString, Eq, PartialEq)]
+#[strum(ascii_case_insensitive)]
+enum Cmd {
+    Stop,
+    Up,
+    Down,
+    Init,
+}
 
 pub struct LineCodec;
 
